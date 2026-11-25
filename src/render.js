@@ -2594,8 +2594,8 @@ function drawOverlays(ctx, state) {
       }
     });
     text(ctx, 'Serve every ticket before its timer dies — tips grow with time to spare, a walkout costs $4.', cx, 600, 14, '#cfe0d8', 'center', false);
-    text(ctx, 'MOVE  WASD / arrows (or click)      WORK  SPACE', cx, 628, 15, COLORS.mustard);
-    text(ctx, 'PRESS ENTER — FIRST SHIFT', cx, 660, 20, '#7dff9a');
+    text(ctx, 'MOVE  WASD / arrows / tap      WORK  SPACE / tap a counter', cx, 628, 15, COLORS.mustard);
+    text(ctx, 'PRESS ENTER OR TAP — FIRST SHIFT', cx, 660, 20, '#7dff9a');
   } else {
     text(ctx, 'LAST ORDERS — SHIFT OVER', cx, 184, 44, '#ffd968');
     text(ctx, `You took $${state.score}`, cx, 238, 29, COLORS.cream);
@@ -2638,7 +2638,7 @@ function drawOverlays(ctx, state) {
     text(ctx, `Tickets served ${state.served}      Walkouts ${state.walkouts}      Best tip $${state.bestTip}`, cx, 490, 17.5, '#cfe0d8', 'center', false);
     const [letter, title] = gradeFor(state.score);
     text(ctx, `KITCHEN GRADE: ${letter} — ${title}`, cx, 532, 22, COLORS.mustard);
-    text(ctx, 'PRESS R TO WORK ANOTHER SHIFT', cx, 578, 17, '#7dff9a');
+    text(ctx, 'PRESS R OR TAP — ANOTHER SHIFT', cx, 578, 17, '#7dff9a');
     // The shift in work, counted at the stations as it happened — the frame's
     // lower third tells the same story in labour instead of money. The
     // strip takes the panel stack's own geometry (345, 590 wide): at
