@@ -2,12 +2,13 @@
 // With ?shot=<name> the game renders one composed scene and stops — that is how the
 // screenshots in /screenshots were taken, reproducibly, from the game's own code.
 
-import { VIEW } from './config.js';
+import { STATIONS, VIEW } from './config.js';
 import { createGame } from './kitchen.js';
-import { interact, promptFor, update } from './actions.js';
+import { interact, nearestStation, promptFor, update } from './actions.js';
 import { spawnTicket } from './orders.js';
 import {
-  attachClicks, attachInput, clearPressed, dropClickTarget, isDown, peekClickTarget, wasPressed,
+  attachClicks, attachInput, clearPressed, dropClickTarget, isDown, peekClickTarget,
+  setClickTarget, takeTap, wasPressed,
 } from './input.js';
 import { draw } from './render.js';
 import { stageShot } from './shots.js';
@@ -27,9 +28,9 @@ let lastStatus = '';
 function announce(state) {
   if (!statusEl) return;
   const msg = state.phase === 'title'
-    ? 'The Daily Catch. Press Enter to start a shift.'
+    ? 'The Daily Catch. Press Enter or tap to start a shift.'
     : state.phase === 'over'
-      ? `Shift over. You took $${state.score}. Press R for another shift.`
+      ? `Shift over. You took $${state.score}. Press R or tap for another shift.`
       : (state.promptText || 'Working the kitchen.');
   if (msg !== lastStatus) {
     lastStatus = msg;
@@ -83,6 +84,10 @@ if (shotName) {
   Object.defineProperty(window, '__game', { get: () => state }); // read by the playtest tooling
   let last = performance.now();
 
+  // A station the player tapped, to be worked on arrival — one queued press
+  // per tap, so a chop still takes as many taps as it takes SPACE presses.
+  let workIntent = null;
+
   function startShift() {
     const seed = (Date.now() % 2147483647) + 1;
     state = createGame(seed);
@@ -90,24 +95,88 @@ if (shotName) {
     spawnTicket(state);
     spawnTicket(state);
     state.spawnT = 6;
+    workIntent = null;
+    dropClickTarget(); // the tap or click that started the shift is not a walk order
     enableSound();
+  }
+
+  function distToRect(x, y, rect) {
+    const dx = Math.max(rect.x - x, 0, x - (rect.x + rect.w));
+    const dy = Math.max(rect.y - y, 0, y - (rect.y + rect.h));
+    return Math.hypot(dx, dy);
+  }
+
+  /** The station a tap means: the one it lands on, or the nearest it nearly lands on. */
+  function stationAt(point) {
+    for (const station of STATIONS) {
+      if (point.x >= station.x && point.x <= station.x + station.w
+        && point.y >= station.y && point.y <= station.y + station.h) return station;
+    }
+    // Forgiving: a tap just off a counter's edge still names that counter —
+    // on a phone screen a counter is a small target, and near should count.
+    let best = null;
+    let bestDist = 44;
+    for (const station of STATIONS) {
+      const d = distToRect(point.x, point.y, station);
+      if (d < bestDist) { bestDist = d; best = station; }
+    }
+    return best;
+  }
+
+  /** The open floor in front of a station, on the chef's own side of it. */
+  function standPoint(station) {
+    const ex = Math.min(station.x + station.w, Math.max(station.x, state.chef.x));
+    const ey = Math.min(station.y + station.h, Math.max(station.y, state.chef.y));
+    let dx = state.chef.x - ex;
+    let dy = state.chef.y - ey;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) { dx = 0; dy = 1; } else { dx /= len; dy /= len; }
+    return { x: ex + dx * 30, y: ey + dy * 30 };
+  }
+
+  /** A tap in play: a station means "walk there and work it"; the floor just means "walk there". */
+  function handleTap(tap) {
+    const station = stationAt(tap);
+    if (!station) {
+      workIntent = null;
+      setClickTarget(tap);
+      return;
+    }
+    if (workIntent && workIntent.id === station.id) {
+      workIntent.presses = Math.min(4, workIntent.presses + 1);
+    } else {
+      workIntent = { id: station.id, presses: 1 };
+    }
+    setClickTarget(standPoint(station));
   }
 
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
 
-    if (state.phase === 'title' && (wasPressed('Enter') || wasPressed('Space'))) startShift();
-    else if (state.phase === 'over' && wasPressed('KeyR')) startShift();
+    const tap = takeTap();
+    if (state.phase === 'title' && (tap || wasPressed('Enter') || wasPressed('Space'))) startShift();
+    else if (state.phase === 'over' && (tap || wasPressed('KeyR'))) startShift();
     else if (state.phase === 'play') {
       if (wasPressed('Space') || wasPressed('KeyE')) interact(state);
+      if (tap) handleTap(tap);
       const input = {
         x: (isDown('KeyD') || isDown('ArrowRight') ? 1 : 0) - (isDown('KeyA') || isDown('ArrowLeft') ? 1 : 0),
         y: (isDown('KeyS') || isDown('ArrowDown') ? 1 : 0) - (isDown('KeyW') || isDown('ArrowUp') ? 1 : 0),
         target: peekClickTarget(),
       };
-      if (input.x !== 0 || input.y !== 0) dropClickTarget();
+      if (input.x !== 0 || input.y !== 0) { dropClickTarget(); workIntent = null; }
       update(state, dt, input);
+      // Arrived at the tapped station? Work it — the one action button,
+      // pressed once per tap that asked for it.
+      if (workIntent) {
+        const near = nearestStation(state);
+        if (near && near.id === workIntent.id) {
+          interact(state);
+          workIntent.presses -= 1;
+          if (workIntent.presses <= 0) workIntent = null;
+        }
+      }
       input.target = peekClickTarget();
       state.promptText = promptFor(state);
     }
