@@ -2,7 +2,7 @@
 // With ?shot=<name> the game renders one composed scene and stops — that is how the
 // screenshots in /screenshots were taken, reproducibly, from the game's own code.
 
-import { INTERACT_RANGE, STATIONS, VIEW, stationById } from './config.js';
+import { CHEF, INTERACT_RANGE, SOLIDS, STATIONS, VIEW, stationById } from './config.js';
 import { createGame } from './kitchen.js';
 import { interact, nearestStation, promptFor, update } from './actions.js';
 import { spawnTicket } from './orders.js';
@@ -87,6 +87,8 @@ if (shotName) {
   // A station the player tapped, to be worked on arrival — one queued press
   // per tap, so a chop still takes as many taps as it takes SPACE presses.
   let workIntent = null;
+  // The corners the current tap's walk is routed through (see planPath).
+  let walkQueue = [];
 
   function startShift() {
     const seed = (Date.now() % 2147483647) + 1;
@@ -96,8 +98,91 @@ if (shotName) {
     spawnTicket(state);
     state.spawnT = 6;
     workIntent = null;
+    walkQueue = [];
     dropClickTarget(); // the tap or click that started the shift is not a walk order
     enableSound();
+  }
+
+  // --- Getting there -------------------------------------------------------
+  // The counters are boxes, and a straight walk across a box's corner can
+  // strand the chef against it: his step aims through the corner while the
+  // counter pushes him out along it, and the two cancel (a tap on the tomato
+  // bin from the shift's start wedged him on the island's corner for good).
+  // Hands on keys steer around corners without thinking; a tap cannot. So a
+  // tap's walk is routed: nodes are the corners of the counters grown by the
+  // chef's radius, edges are the straight lines that stay clear of every
+  // counter, and the shortest chain of corners leads the walk.
+  const WALLS = SOLIDS.map((s) => ({
+    minX: s.x - CHEF.radius - 2, maxX: s.x + s.w + CHEF.radius + 2,
+    minY: s.y - CHEF.radius - 2, maxY: s.y + s.h + CHEF.radius + 2,
+  }));
+
+  /** Does the segment cross the wall's inside? Grazing its face is clear. */
+  function segmentBlocked(ax, ay, bx, by, wall) {
+    const minX = wall.minX + 1, maxX = wall.maxX - 1, minY = wall.minY + 1, maxY = wall.maxY - 1;
+    const dx = bx - ax, dy = by - ay;
+    let t0 = 0, t1 = 1;
+    if (Math.abs(dx) < 1e-9) { if (ax < minX || ax > maxX) return false; } else {
+      let ta = (minX - ax) / dx, tb = (maxX - ax) / dx;
+      if (ta > tb) [ta, tb] = [tb, ta];
+      t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+      if (t0 > t1) return false;
+    }
+    if (Math.abs(dy) < 1e-9) { if (ay < minY || ay > maxY) return false; } else {
+      let ta = (minY - ay) / dy, tb = (maxY - ay) / dy;
+      if (ta > tb) [ta, tb] = [tb, ta];
+      t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+      if (t0 > t1) return false;
+    }
+    return true;
+  }
+
+  /** The corner chain that walks the chef from where he stands to a point. */
+  function planPath(target) {
+    const nodes = [{ x: state.chef.x, y: state.chef.y }];
+    for (const wall of WALLS) {
+      for (const [nx, ny] of [[wall.minX, wall.minY], [wall.maxX, wall.minY], [wall.minX, wall.maxY], [wall.maxX, wall.maxY]]) {
+        nodes.push({
+          x: Math.min(VIEW.width - CHEF.radius, Math.max(CHEF.radius, nx)),
+          y: Math.min(VIEW.height - CHEF.radius, Math.max(CHEF.radius, ny)),
+        });
+      }
+    }
+    nodes.push({ x: target.x, y: target.y });
+    const goal = nodes.length - 1;
+    const inside = (p, wall) => p.x > wall.minX && p.x < wall.maxX && p.y > wall.minY && p.y < wall.maxY;
+    // A wall an endpoint already stands against cannot block that leg: the
+    // last steps into a counter's margin are the collision system's work.
+    const clear = (a, b) => WALLS.every((wall) => inside(a, wall) || inside(b, wall)
+      || !segmentBlocked(a.x, a.y, b.x, b.y, wall));
+    const dist = nodes.map(() => Infinity);
+    const prev = nodes.map(() => -1);
+    const done = nodes.map(() => false);
+    dist[0] = 0;
+    for (let n = 0; n < nodes.length; n++) {
+      let u = -1;
+      for (let i = 0; i < nodes.length; i++) if (!done[i] && (u === -1 || dist[i] < dist[u])) u = i;
+      if (u === -1 || dist[u] === Infinity || u === goal) break;
+      done[u] = true;
+      for (let v = 0; v < nodes.length; v++) {
+        if (v === u || done[v]) continue;
+        const w = Math.hypot(nodes[u].x - nodes[v].x, nodes[u].y - nodes[v].y);
+        if (dist[u] + w < dist[v] && clear(nodes[u], nodes[v])) {
+          dist[v] = dist[u] + w;
+          prev[v] = u;
+        }
+      }
+    }
+    if (prev[goal] === -1) return [{ x: target.x, y: target.y }];
+    const path = [];
+    for (let u = goal; u > 0; u = prev[u]) path.unshift({ x: nodes[u].x, y: nodes[u].y });
+    return path;
+  }
+
+  /** Send the chef to a point, around whatever counters stand in the way. */
+  function walkTo(point) {
+    walkQueue = planPath(point);
+    setClickTarget(walkQueue[0] || point);
   }
 
   function distToRect(x, y, rect) {
@@ -153,7 +238,7 @@ if (shotName) {
     const station = stationAt(tap);
     if (!station) {
       workIntent = null;
-      setClickTarget(tap);
+      walkTo(tap);
       return;
     }
     if (workIntent && workIntent.id === station.id) {
@@ -161,7 +246,7 @@ if (shotName) {
     } else {
       workIntent = { id: station.id, presses: 1 };
     }
-    setClickTarget(doorstepFor(station, tap));
+    walkTo(doorstepFor(station, tap));
   }
 
   function frame(now) {
@@ -174,12 +259,18 @@ if (shotName) {
     else if (state.phase === 'play') {
       if (wasPressed('Space') || wasPressed('KeyE')) interact(state);
       if (tap) handleTap(tap);
+      // Walk the routed path corner by corner; reaching one aims at the next.
+      if (walkQueue.length) {
+        const head = walkQueue[0];
+        if (Math.hypot(state.chef.x - head.x, state.chef.y - head.y) <= 12) walkQueue.shift();
+        if (walkQueue.length) setClickTarget(walkQueue[0]);
+      }
       const input = {
         x: (isDown('KeyD') || isDown('ArrowRight') ? 1 : 0) - (isDown('KeyA') || isDown('ArrowLeft') ? 1 : 0),
         y: (isDown('KeyS') || isDown('ArrowDown') ? 1 : 0) - (isDown('KeyW') || isDown('ArrowUp') ? 1 : 0),
         target: peekClickTarget(),
       };
-      if (input.x !== 0 || input.y !== 0) { dropClickTarget(); workIntent = null; }
+      if (input.x !== 0 || input.y !== 0) { dropClickTarget(); workIntent = null; walkQueue = []; }
       update(state, dt, input);
       // Arrived at the tapped station? Work it — the one action button,
       // pressed once per tap that asked for it.
@@ -195,7 +286,7 @@ if (shotName) {
           // counter's doorstep until it is the station in hand.
           const tapped = stationById(workIntent.id);
           if (tapped && distToRect(state.chef.x, state.chef.y, tapped) < INTERACT_RANGE) {
-            setClickTarget(doorstepFor(tapped, state.chef));
+            walkTo(doorstepFor(tapped, state.chef));
           }
         }
       }
