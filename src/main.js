@@ -2,7 +2,7 @@
 // With ?shot=<name> the game renders one composed scene and stops — that is how the
 // screenshots in /screenshots were taken, reproducibly, from the game's own code.
 
-import { STATIONS, VIEW } from './config.js';
+import { INTERACT_RANGE, STATIONS, VIEW, stationById } from './config.js';
 import { createGame } from './kitchen.js';
 import { interact, nearestStation, promptFor, update } from './actions.js';
 import { spawnTicket } from './orders.js';
@@ -123,15 +123,29 @@ if (shotName) {
     return best;
   }
 
-  /** The open floor in front of a station, on the chef's own side of it. */
-  function standPoint(station) {
+  /**
+   * The open floor in front of a station: its doorstep. Each counter is worked
+   * from one side — the back counter from below, the front counter from above,
+   * the side counters from the room — and the doorstep sits on that side, in
+   * front of the spot the player tapped, so the chef queues up in front of the
+   * station they named and not in front of its neighbour. The island stands
+   * alone in the room, so its doorstep is whichever edge is nearest the chef.
+   */
+  function doorstepFor(station, tap) {
+    const step = 30;
+    const clampX = Math.min(station.x + station.w - 12, Math.max(station.x + 12, tap.x));
+    const clampY = Math.min(station.y + station.h - 12, Math.max(station.y + 12, tap.y));
+    if (station.y < 240) return { x: clampX, y: station.y + station.h + step };
+    if (station.y > 600) return { x: clampX, y: station.y - step };
+    if (station.x < 200) return { x: station.x + station.w + step, y: clampY };
+    if (station.x + station.w > 1080) return { x: station.x - step, y: clampY };
     const ex = Math.min(station.x + station.w, Math.max(station.x, state.chef.x));
     const ey = Math.min(station.y + station.h, Math.max(station.y, state.chef.y));
     let dx = state.chef.x - ex;
     let dy = state.chef.y - ey;
     const len = Math.hypot(dx, dy);
     if (len === 0) { dx = 0; dy = 1; } else { dx /= len; dy /= len; }
-    return { x: ex + dx * 30, y: ey + dy * 30 };
+    return { x: ex + dx * step, y: ey + dy * step };
   }
 
   /** A tap in play: a station means "walk there and work it"; the floor just means "walk there". */
@@ -147,7 +161,7 @@ if (shotName) {
     } else {
       workIntent = { id: station.id, presses: 1 };
     }
-    setClickTarget(standPoint(station));
+    setClickTarget(doorstepFor(station, tap));
   }
 
   function frame(now) {
@@ -175,6 +189,14 @@ if (shotName) {
           interact(state);
           workIntent.presses -= 1;
           if (workIntent.presses <= 0) workIntent = null;
+        } else {
+          // In range of the tapped station but standing nearer a neighbour
+          // (the grill and the fryer stand close): step in toward the tapped
+          // counter's doorstep until it is the station in hand.
+          const tapped = stationById(workIntent.id);
+          if (tapped && distToRect(state.chef.x, state.chef.y, tapped) < INTERACT_RANGE) {
+            setClickTarget(doorstepFor(tapped, state.chef));
+          }
         }
       }
       input.target = peekClickTarget();
